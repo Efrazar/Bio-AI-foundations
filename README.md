@@ -5,7 +5,7 @@ As a scientist, my goal is to leverage Deep Learning to solve complex problems i
 
 
 ### 🖥️ The Local AI Server (Hardware)
-To maintain data privacy and allow for rapid iteration on proprietary biological datasets, I operate a custom local inference and training rig:
+To maintain data privacy and allow for rapid iteration on proprietary biological datasets, I operate a custom local inference and training rig:\
 	Host: HP EliteBook 840 G5 (Intel i7 | 32GB DDR4 RAM)
 	Accelerator (eGPU): NVIDIA RTX 2080 Ti (11GB VRAM) via Razer Core X (Thunderbolt 3)
 	Environment: Ubuntu / WSL2 with PyTorch & CUDA optimization
