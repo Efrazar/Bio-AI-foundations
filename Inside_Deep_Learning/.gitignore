@@ -1,0 +1,9 @@
+# Torchvision data sets
+data/
+
+# Python cache
+__pycache__/
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
