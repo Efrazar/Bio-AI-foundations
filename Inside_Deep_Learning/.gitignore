@@ -4,6 +4,9 @@ data/
 # Python cache
 __pycache__/
 
+# Checkpoints of trained models
+checkpoints/
+
 # Jupyter
 .ipynb_checkpoints/
 .jupyter/
