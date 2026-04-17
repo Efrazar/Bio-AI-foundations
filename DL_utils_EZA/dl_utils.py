@@ -435,3 +435,132 @@ def moveTo(obj, device):
         return {moveTo(k, device): moveTo(v, device) for k, v in obj.items()}
     else:
         return obj
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Improved Neural Network EZA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def train_network_EZA(model, 
+                      loss_func, 
+                      train_loader, 
+                      test_loader=None,
+                      score_funcs=None, 
+                      epochs=300, 
+                      device='cpu',                      
+                      checkpoint_file=None, 
+                      resume_from_checkpoint=None,
+                      checkpoint_every_x=None, 
+                      use_amp=True,
+                      optimizer=None,
+                      lr_schedule=None):
+    
+    
+    """
+    Train neural networks with EZA improvements.
+
+    Keyword arguments:
+    model                  -- PyTorch model to train
+    loss_func              -- loss function (outputs, labels) -> score
+    train_loader           -- DataLoader returning (input, label) tuples
+    test_loader            -- Optional DataLoader for evaluation after every epoch
+    score_funcs            -- dict of scoring functions e.g. {'Accuracy': accuracy_score}
+    epochs                 -- number of training epochs
+    device                 -- 'cuda' or 'cpu'
+    checkpoint_file        -- path to save final checkpoint
+    resume_from_checkpoint -- path to load checkpoint from to resume training
+    checkpoint_every_x     -- save intermediate checkpoint every X epochs
+    use_amp                -- enable Automatic Mixed Precision (RTX GPUs)
+    optimizer              -- if none selected it uses AdamW optimizer
+    lr_schedule            -- uses the ReduceLROPlateu function.
+
+    Returns: pd.DataFrame with training history
+
+    ------------------------------------------------------------------------------------------
+    
+    Improves over the train_simple_network:
+    - Uses new optimizers and schedulers
+
+
+    """
+    to_track = ["epoch", "total time", "train loss"]
+    if test_loader is not None:
+        to_track.append("test loss")
+    if score_funcs:
+        for eval_score in score_funcs:
+            to_track.append("train " + eval_score)
+            if test_loader is not None:
+                to_track.append("test " + eval_score)
+
+    results = {item: [] for item in to_track}
+
+    if optimizer == None:
+        optimizer   = torch.optim.AdamW(model.parameters())
+    amp_enabled = use_amp and (device == "cuda")
+    scaler      = torch.amp.GradScaler() if amp_enabled else None
+
+    start_epoch = 0
+
+    if resume_from_checkpoint is not None:
+        checkpoint = torch.load(resume_from_checkpoint, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        results = checkpoint.get('results', results)
+        total_train_time = results["total time"][-1] if results["total time"] else 0
+        print(f"Resuming from epoch {start_epoch}, previous time: {total_train_time:.2f}s")
+
+    model.to(device)
+
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
+
+    for epoch in tqdm(range(start_epoch, epochs), desc="Epoch"):
+        model = model.train()
+
+        epoch_time = run_epoch(model, optimizer, train_loader, loss_func, device,
+                               results, score_funcs, prefix="train",
+                               desc="Training", scaler=scaler)
+
+        results["total time"].append(epoch_time)
+        results["epoch"].append(epoch)
+
+        if test_loader is not None:
+            model = model.eval()
+            with torch.no_grad():
+                run_epoch(model, optimizer, test_loader, loss_func, device,
+                          results, score_funcs, prefix="test", desc="Testing")
+
+        #In PyTorch, the convention is to update the learning rate after every epoch
+        if lr_schedule is not None:
+            if isinstance(lr_schedule, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                lr_schedule.step(results["val loss"][-1])
+            else:
+                lr_schedule.step()
+
+        # Periodic checkpoint
+        if checkpoint_every_x is not None and (epoch + 1) % checkpoint_every_x == 0:
+            ckpt_path = checkpoint_file if checkpoint_file else f'checkpoint_epoch_{epoch}.tar'
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'results': results
+            }, ckpt_path)
+            print(f"Checkpoint saved at epoch {epoch}")
+
+    # Final checkpoint
+    if checkpoint_file is not None:
+        payload = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "results": results,
+        }
+        if scaler is not None:
+            payload["scaler_state_dict"] = scaler.state_dict()
+        torch.save(payload, checkpoint_file)
+
+    return pd.DataFrame.from_dict(results)
