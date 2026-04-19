@@ -453,7 +453,8 @@ def train_network_EZA(model,
                       checkpoint_every_x=None, 
                       use_amp=True,
                       optimizer=None,
-                      lr_schedule=None):
+                      lr_schedule=None,
+                      val_loader=None):
     
     
     """
@@ -473,6 +474,7 @@ def train_network_EZA(model,
     use_amp                -- enable Automatic Mixed Precision (RTX GPUs)
     optimizer              -- if none selected it uses AdamW optimizer
     lr_schedule            -- uses the ReduceLROPlateu function.
+    val_loader             -- Optional PyTorch DataLoader to evaluate on after every epoch
 
     Returns: pd.DataFrame with training history
 
@@ -484,11 +486,15 @@ def train_network_EZA(model,
 
     """
     to_track = ["epoch", "total time", "train loss"]
+    if val_loader is not None:
+        to_track.append("val loss")
     if test_loader is not None:
         to_track.append("test loss")
     if score_funcs:
         for eval_score in score_funcs:
             to_track.append("train " + eval_score)
+            if val_loader is not None:
+                to_track.append("val " + eval_score)
             if test_loader is not None:
                 to_track.append("test " + eval_score)
 
@@ -533,6 +539,11 @@ def train_network_EZA(model,
                 run_epoch(model, optimizer, test_loader, loss_func, device,
                           results, score_funcs, prefix="test", desc="Testing")
 
+        if val_loader is not None:
+            model = model.eval() #Set the model to "evaluation" mode, b/c we don't want to make any updates!
+            with torch.no_grad():
+                run_epoch(model, optimizer, val_loader, loss_func, device, results, score_funcs, prefix="val", desc="Validating")
+        
         #In PyTorch, the convention is to update the learning rate after every epoch
         if lr_schedule is not None:
             if isinstance(lr_schedule, torch.optim.lr_scheduler.ReduceLROnPlateau):
