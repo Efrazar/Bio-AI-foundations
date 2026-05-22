@@ -575,3 +575,88 @@ def train_network_EZA(model,
         torch.save(payload, checkpoint_file)
 
     return pd.DataFrame.from_dict(results)
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+from skimage.io import imread
+from glob import glob
+
+
+class DSB2018_EZA(Dataset):
+    """
+    Dataset class for the 2018 Data Science Bowl (DSB2018) — Kaggle.
+    
+    Loads nucleus microscopy images and their corresponding binary segmentation masks.
+    
+    Optimized for:
+        - RTX 2080 Ti (10.57 GB VRAM, Turing sm_75)
+        - FP16 / AMP training (half-precision tensors on GPU)
+        - PyTorch 2.9.1 + CUDA 12.8
+    
+    Args:
+        paths  (list[str]) : List of sample root directories. Each directory must contain:
+                               <path>/images/<image>.png   — one RGB image
+                               <path>/masks/<mask_n>.png   — one or more binary masks
+        size   (int)       : Target spatial resolution for both image and mask (default 256).
+        device (str)       : 'cuda' or 'cpu'. Pre-pins data to the right device.
+    """
+
+    def __init__(self, paths: list, size: int = 256, device: str = "cpu"):
+        self.paths  = paths
+        self.size   = size
+        self.device = device
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def __getitem__(self, idx: int):
+        # ── 1. Resolve file paths ──────────────────────────────────────────────
+        img_path   = glob(self.paths[idx] + "/images/*")[0]
+        mask_paths = glob(self.paths[idx] + "/masks/*")   # N individual nucleus masks
+
+        # ── 2. Load image ──────────────────────────────────────────────────────
+        # imread returns HWC uint8 → keep only RGB (drop alpha if present)
+        img = imread(img_path)[:, :, :3]          # (H, W, 3)  uint8
+
+        # HWC → CHW, then float32 ∈ [0, 1]
+        # float32 here is intentional: AMP will cast to FP16 *inside* the model
+        # via autocast; keeping the DataLoader output in float32 avoids surprising
+        # precision losses before the forward pass.
+        img = np.moveaxis(img, -1, 0).astype(np.float32) / 255.0  # (3, H, W)
+
+        # ── 3. Load & merge binary masks ───────────────────────────────────────
+        # Each .png file encodes one nucleus as a separate binary mask.
+        # We collapse them into a single binary segmentation map with logical OR.
+        masks      = [imread(f) / 255.0 for f in mask_paths]  # list of (H, W) float64
+        final_mask = np.zeros(masks[0].shape, dtype=np.float32)
+
+        for mask in masks:
+            # logical_or: any pixel belonging to ANY nucleus → 1.0
+            final_mask = np.logical_or(final_mask, mask)
+
+        final_mask = final_mask.astype(np.float32)             # (H, W)
+
+        # ── 4. NumPy → PyTorch tensors ─────────────────────────────────────────
+        img_t  = torch.from_numpy(img)                         # (3, H, W)
+        mask_t = torch.from_numpy(final_mask).unsqueeze(0)     # (1, H, W)
+
+        # ── 5. Spatial resize to (size × size) ────────────────────────────────
+        # F.interpolate requires a batch dim → add then remove.
+        # 'bilinear' for the image preserves smooth gradients.
+        # 'nearest'  for the mask keeps it strictly binary (no interpolation artefacts).
+        img_t = F.interpolate(
+            img_t.unsqueeze(0),
+            size=(self.size, self.size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)                                           # (3, size, size)
+
+        mask_t = F.interpolate(
+            mask_t.unsqueeze(0),
+            size=(self.size, self.size),
+            mode="nearest",
+        ).squeeze(0)                                           # (1, size, size)
+
+        return img_t, mask_t   # both float32; AMP handles FP16 casting during training
