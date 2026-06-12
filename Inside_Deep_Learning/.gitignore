@@ -6,6 +6,7 @@ __pycache__/
 
 # Checkpoints of trained models
 checkpoints/
+checkpoints_wgan_gp/
 
 # Jupyter
 .ipynb_checkpoints/
