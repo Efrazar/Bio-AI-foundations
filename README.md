@@ -15,14 +15,14 @@ To maintain data privacy and allow for rapid iteration on proprietary biological
 I am currently bridging the gap between biological theory and computational architecture through the following rigorous frameworks:
 1. Architectural Foundations
 *	Source: Inside Deep Learning by Edward Raff
-*	Focus: Implementing neural architectures from scratch, understanding backpropagation, and manual gradient descent optimization.
+*	Focus: Implementing neural architectures from scratch (Fully connected networks, CNNs, RNN, Autoencoders, GANs), understanding backpropagation, and manual gradient descent optimization.
 *	Bio-Link: Translating signal processing in cells into mathematical weight distributions.
 2. Visual & Intuitive Deep Learning
 *	Source: Deep Learning: A Visual Approach by Andrew Glassner
 *	Focus: Computer vision, CNNs, and the geometric intuition behind high-dimensional data.
 *	Bio-Link: Automating microscopy analysis and identifying patterns in spatial transcriptomics.
 
-### 🧪 Current Bio-AI Research Interests
+### 🧪 Current Bio-AI Research Interests (active learning)
 My work is evolving toward the practical application of Small Language Models (SLMs) and Agents in the wet-lab and dry-lab environments:
 * Fine-Tuning for Bio-Domain: Adapting Llama 3.2 (3B) and Qwen 2.5 (7B) to interpret proprietary lab protocols and PubMed data.
 *	Protein Folding & Design: Deploying ESM-2 locally for mutation effect prediction.
@@ -30,8 +30,45 @@ My work is evolving toward the practical application of Small Language Models (S
 
 ### 📁 Repository Structure
 Bio-AI-Foundations\
-├── /Inside_Deep_Learning/          # Implementations from Raff & Glassner\
-│   ├── mlp_from_scratch/  # Multi-layer perceptrons in PyTorch
+.
+├── Deep Learning
+│   └── Deep_Learning.ipynb
+├── DL_utils_EZA
+│   ├── biggan_semantic_vectors.py
+│   ├── dl_utils.py
+│   └── __pycache__
+├── gradient descent
+│   ├── gradient_descent_example.py
+│   ├── GRADIENT_DESCENT_FUNCTIONS.py
+│   └── Gradient_descent_test_1.py
+├── hardware
+│   ├── export_report.py
+│   ├── hardware_validator.py
+│   ├── __pycache__
+│   └── system_report.svg
+├── HARDWARE.md
+├── Inside_Deep_Learning
+│   ├── 01_Mechanics_of_learning_exercises.ipynb
+│   ├── 02_Fully_Connected_Networks_exercises.ipynb
+│   ├── 02_Fully_Connected_Networks.ipynb
+│   ├── 03_CIFAR10_CNN_EZA.ipynb
+│   ├── 03_CNN_exercise_1.ipynb
+│   ├── 03_Convolutional_Neuronal_Networks.ipynb
+│   ├── 04_Recurrent_Neural_Networks.ipynb
+│   ├── 05_Modern_training_techniques.ipynb
+│   ├── 06_Common_design_building_blocks.ipynb
+│   ├── 07_Autoencoding_&_Self-supervision.ipynb
+│   ├── 08_Object_Detection.ipynb
+│   ├── 09_Generative_Adversarial_Networks.ipynb
+│   ├── checkpoints
+│   ├── checkpoints_wgan_gp
+│   ├── data
+│   ├── Foundational_Methods
+│   ├── idlmam.py
+│   ├── images_test
+│   ├── __pycache__
+│   └── PyTorch_training.ipynb
+└── README.md
 
 ### 🤝 Connect with Me
 I am always interested in collaborating on Open Science and AI-driven drug discovery.
