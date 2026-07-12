@@ -31,43 +31,43 @@ My work is evolving toward the practical application of Small Language Models (S
 ### 📁 Repository Structure
 Bio-AI-Foundations\
 .
-├── Deep Learning
-│   └── Deep_Learning.ipynb
-├── DL_utils_EZA
-│   ├── biggan_semantic_vectors.py
-│   ├── dl_utils.py
-│   └── __pycache__
-├── gradient descent
-│   ├── gradient_descent_example.py
-│   ├── GRADIENT_DESCENT_FUNCTIONS.py
-│   └── Gradient_descent_test_1.py
-├── hardware
-│   ├── export_report.py
-│   ├── hardware_validator.py
-│   ├── __pycache__
-│   └── system_report.svg
-├── HARDWARE.md
-├── Inside_Deep_Learning
-│   ├── 01_Mechanics_of_learning_exercises.ipynb
-│   ├── 02_Fully_Connected_Networks_exercises.ipynb
-│   ├── 02_Fully_Connected_Networks.ipynb
-│   ├── 03_CIFAR10_CNN_EZA.ipynb
-│   ├── 03_CNN_exercise_1.ipynb
-│   ├── 03_Convolutional_Neuronal_Networks.ipynb
-│   ├── 04_Recurrent_Neural_Networks.ipynb
-│   ├── 05_Modern_training_techniques.ipynb
-│   ├── 06_Common_design_building_blocks.ipynb
-│   ├── 07_Autoencoding_&_Self-supervision.ipynb
-│   ├── 08_Object_Detection.ipynb
-│   ├── 09_Generative_Adversarial_Networks.ipynb
-│   ├── checkpoints
-│   ├── checkpoints_wgan_gp
-│   ├── data
-│   ├── Foundational_Methods
-│   ├── idlmam.py
-│   ├── images_test
-│   ├── __pycache__
-│   └── PyTorch_training.ipynb
+├── Deep Learning\
+│   └── Deep_Learning.ipynb\
+├── DL_utils_EZA\
+│   ├── biggan_semantic_vectors.py\
+│   ├── dl_utils.py\
+│   └── __pycache__\
+├── gradient descent\
+│   ├── gradient_descent_example.py\
+│   ├── GRADIENT_DESCENT_FUNCTIONS.py\
+│   └── Gradient_descent_test_1.py\
+├── hardware\
+│   ├── export_report.py\
+│   ├── hardware_validator.py\
+│   ├── __pycache__\
+│   └── system_report.svg\
+├── HARDWARE.md\
+├── Inside_Deep_Learning\
+│   ├── 01_Mechanics_of_learning_exercises.ipynb\
+│   ├── 02_Fully_Connected_Networks_exercises.ipynb\
+│   ├── 02_Fully_Connected_Networks.ipynb\
+│   ├── 03_CIFAR10_CNN_EZA.ipynb\
+│   ├── 03_CNN_exercise_1.ipynb\
+│   ├── 03_Convolutional_Neuronal_Networks.ipynb\
+│   ├── 04_Recurrent_Neural_Networks.ipynb\
+│   ├── 05_Modern_training_techniques.ipynb\
+│   ├── 06_Common_design_building_blocks.ipynb\
+│   ├── 07_Autoencoding_&_Self-supervision.ipynb\
+│   ├── 08_Object_Detection.ipynb\
+│   ├── 09_Generative_Adversarial_Networks.ipynb\
+│   ├── checkpoints\
+│   ├── checkpoints_wgan_gp\
+│   ├── data\
+│   ├── Foundational_Methods\
+│   ├── idlmam.py\
+│   ├── images_test\
+│   ├── __pycache__\
+│   └── PyTorch_training.ipynb\
 └── README.md
 
 ### 🤝 Connect with Me
