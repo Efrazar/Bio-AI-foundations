@@ -424,7 +424,7 @@ def train_simple_network_EZA(model, loss_func, train_loader, test_loader=None,
 def moveTo(obj, device):
     """Recursively move tensors/collections to the target device."""
     if hasattr(obj, "to"):
-        return obj.to(device)
+        return obj.to(device, non_blocking=True)
     elif isinstance(obj, list):
         return [moveTo(x, device) for x in obj]
     elif isinstance(obj, tuple):
