@@ -16,6 +16,8 @@ import matplotlib.patches as mpatches
 import pandas as pd
 import os
 import time
+from glob import glob
+from skimage.io import imread
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CIFAR-10 constants
@@ -254,21 +256,67 @@ def predict_batch_EZA(dataset, model, device, n=12,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Training Model Functions 
+# Training Model Functions
 # ─────────────────────────────────────────────────────────────────────────────
+def _compact_predictions(y_hat, labels, ignore_index=None):
+    """
+    Shrink model outputs ON THE GPU before they are copied to the CPU.
+
+    Why: the old code copied full logit tensors to the CPU and kept them in
+    Python lists. For CIFAR-10 that is 10 floats per image (fine). For a
+    Seq2Seq model with a 24,577-word vocabulary it is
+    ~60k sentences x ~7 steps x 24,577 floats ≈ 10 billion numbers per epoch,
+    far beyond 31 GB of RAM. Taking argmax on the GPU first sends 1 integer
+    per prediction across the Thunderbolt link instead of V floats.
+
+    Handles:
+      - tuple outputs (e.g. (logits, attention) from a model in eval mode)
+      - (B, C) classification logits     -> (B,) class ids
+      - (B, T, V) sequence logits         -> flattened token ids, PAD removed
+      - (B, 1) / (B,) regression outputs  -> kept as values
+    """
+    if isinstance(y_hat, tuple):
+        y_hat = y_hat[0]
+    y_hat = y_hat.detach()
+
+    if y_hat.dim() == 3 and labels.dim() == 2:           # sequence model
+        T = min(y_hat.size(1), labels.size(1))
+        preds = y_hat[:, :T].argmax(dim=-1).reshape(-1)
+        labels = labels[:, :T].reshape(-1)
+        if ignore_index is not None:
+            keep = labels != ignore_index
+            preds, labels = preds[keep], labels[keep]
+    elif y_hat.dim() == 2 and y_hat.size(1) > 1:         # classification
+        preds = y_hat.argmax(dim=1)
+    else:                                                # regression
+        preds = y_hat.float()
+
+    return labels.cpu().numpy(), preds.cpu().numpy()
+
+
 def run_epoch(model, optimizer, data_loader, loss_func, device, results,
-              score_funcs, prefix="", desc=None, scaler=None):
+              score_funcs, prefix="", desc=None, scaler=None, ignore_index=None):
     """
     scaler : GradScaler | None
-    Pass the GradScaler created in train_simple_network_EZA.
-    None = standard FP32 path (no AMP).
-    NEVER create the scaler inside this function.
+        Pass the GradScaler created in train_*_network_EZA.
+        None = standard FP32 path (no AMP).  NEVER create the scaler in here.
+        In eval mode the scaler is only used as an "AMP on" flag (autocast).
+    ignore_index : int | None
+        Label value to drop before scoring (e.g. PAD=0 for sequence models).
+
+    Memory notes (RTX 2080 Ti on a Thunderbolt 3 eGPU):
+      - Loss is accumulated ON the GPU and read once per epoch.  Calling
+        loss.item() every batch forces the CPU to wait for the GPU
+        (a synchronization point) on every step.
+      - Predictions are reduced with argmax on the GPU before copying.
+      - Arrays are concatenated once at the end, not via Python lists of floats.
     """
-    running_loss = []
-    y_true = []
-    y_pred = []
+    running_loss = torch.zeros((), device=device)
+    n_batches = 0
+    y_true, y_pred = [], []
     start = time.time()
     is_training = model.training
+    use_autocast = scaler is not None
 
     for inputs, labels in tqdm(data_loader, desc=desc, leave=False):
         inputs = moveTo(inputs, device)
@@ -277,7 +325,7 @@ def run_epoch(model, optimizer, data_loader, loss_func, device, results,
         if is_training:
             optimizer.zero_grad(set_to_none=True)
 
-            if scaler is not None:
+            if use_autocast:
                 with torch.amp.autocast(device_type="cuda"):
                     y_hat = model(inputs)
                     loss = loss_func(y_hat, labels)
@@ -291,7 +339,7 @@ def run_epoch(model, optimizer, data_loader, loss_func, device, results,
                 optimizer.step()
         else:
             with torch.no_grad():
-                if scaler is not None:
+                if use_autocast:
                     with torch.amp.autocast(device_type="cuda"):
                         y_hat = model(inputs)
                         loss = loss_func(y_hat, labels)
@@ -299,22 +347,20 @@ def run_epoch(model, optimizer, data_loader, loss_func, device, results,
                     y_hat = model(inputs)
                     loss = loss_func(y_hat, labels)
 
-        running_loss.append(loss.item())
+        running_loss += loss.detach().float()
+        n_batches += 1
 
         if score_funcs and isinstance(labels, torch.Tensor):
-            labels = labels.detach().cpu().numpy()
-            y_hat  = y_hat.detach().cpu().numpy()
-            y_true.extend(labels.tolist())
-            y_pred.extend(y_hat.tolist())
+            t, p = _compact_predictions(y_hat, labels, ignore_index)
+            y_true.append(t)
+            y_pred.append(p)
 
     end = time.time()
 
-    y_pred = np.asarray(y_pred)
-    if len(y_pred.shape) == 2 and y_pred.shape[1] > 1:
-        y_pred = np.argmax(y_pred, axis=1)
-
-    results[prefix + " loss"].append(np.mean(running_loss))
+    results[prefix + " loss"].append((running_loss / max(n_batches, 1)).item())
     if score_funcs:
+        y_true = np.concatenate(y_true) if y_true else np.array([])
+        y_pred = np.concatenate(y_pred) if y_pred else np.array([])
         for name, score_func in score_funcs.items():
             try:
                 results[prefix + " " + name].append(score_func(y_true, y_pred))
@@ -327,7 +373,7 @@ def run_epoch(model, optimizer, data_loader, loss_func, device, results,
 def train_simple_network_EZA(model, loss_func, train_loader, test_loader=None,
                               score_funcs=None, epochs=300, device='cpu',
                               checkpoint_file=None, resume_from_checkpoint=None,
-                              checkpoint_every_x=None, use_amp=True):
+                              checkpoint_every_x=None, use_amp=True, ignore_index=None):
     """
     Train simple neural networks with EZA improvements.
 
@@ -343,88 +389,29 @@ def train_simple_network_EZA(model, loss_func, train_loader, test_loader=None,
     resume_from_checkpoint -- path to load checkpoint from to resume training
     checkpoint_every_x     -- save intermediate checkpoint every X epochs
     use_amp                -- enable Automatic Mixed Precision (RTX GPUs)
+    ignore_index           -- label value dropped before scoring (e.g. PAD token)
 
     Returns: pd.DataFrame with training history
     """
-    to_track = ["epoch", "total time", "train loss"]
-    if test_loader is not None:
-        to_track.append("test loss")
-    if score_funcs:
-        for eval_score in score_funcs:
-            to_track.append("train " + eval_score)
-            if test_loader is not None:
-                to_track.append("test " + eval_score)
-
-    results = {item: [] for item in to_track}
-
-    optimizer   = torch.optim.Adam(model.parameters(), lr=0.001)
-    amp_enabled = use_amp and (device == "cuda")
-    scaler      = torch.amp.GradScaler() if amp_enabled else None
-
-    start_epoch = 0
-
-    if resume_from_checkpoint is not None:
-        checkpoint = torch.load(resume_from_checkpoint, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        results = checkpoint.get('results', results)
-        total_train_time = results["total time"][-1] if results["total time"] else 0
-        print(f"Resuming from epoch {start_epoch}, previous time: {total_train_time:.2f}s")
-
-    model.to(device)
-
-    for state in optimizer.state.values():
-        for k, v in state.items():
-            if isinstance(v, torch.Tensor):
-                state[k] = v.to(device)
-
-    for epoch in tqdm(range(start_epoch, epochs), desc="Epoch"):
-        model = model.train()
-
-        epoch_time = run_epoch(model, optimizer, train_loader, loss_func, device,
-                               results, score_funcs, prefix="train",
-                               desc="Training", scaler=scaler)
-
-        results["total time"].append(epoch_time)
-        results["epoch"].append(epoch)
-
-        if test_loader is not None:
-            model = model.eval()
-            with torch.no_grad():
-                run_epoch(model, optimizer, test_loader, loss_func, device,
-                          results, score_funcs, prefix="test", desc="Testing")
-
-        # Periodic checkpoint
-        if checkpoint_every_x is not None and (epoch + 1) % checkpoint_every_x == 0:
-            ckpt_path = checkpoint_file if checkpoint_file else f'checkpoint_epoch_{epoch}.tar'
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'results': results
-            }, ckpt_path)
-            print(f"Checkpoint saved at epoch {epoch}")
-
-    # Final checkpoint
-    if checkpoint_file is not None:
-        payload = {
-            "epoch": epoch,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "results": results,
-        }
-        if scaler is not None:
-            payload["scaler_state_dict"] = scaler.state_dict()
-        torch.save(payload, checkpoint_file)
-
-    return pd.DataFrame.from_dict(results)
+    return train_network_EZA(model, loss_func, train_loader, test_loader=test_loader,
+                             score_funcs=score_funcs, epochs=epochs, device=device,
+                             checkpoint_file=checkpoint_file,
+                             resume_from_checkpoint=resume_from_checkpoint,
+                             checkpoint_every_x=checkpoint_every_x, use_amp=use_amp,
+                             optimizer=torch.optim.Adam(model.parameters(), lr=0.001),
+                             ignore_index=ignore_index)
 
 
 def moveTo(obj, device):
-    """Recursively move tensors/collections to the target device."""
-    if hasattr(obj, "to"):
+    """
+    Recursively move tensors/collections to the target device.
+    non_blocking=True lets the copy overlap with GPU compute when the
+    DataLoader uses pin_memory=True — useful over a Thunderbolt link.
+    """
+    if isinstance(obj, torch.Tensor):
         return obj.to(device, non_blocking=True)
+    elif hasattr(obj, "to"):
+        return obj.to(device)
     elif isinstance(obj, list):
         return [moveTo(x, device) for x in obj]
     elif isinstance(obj, tuple):
@@ -440,23 +427,21 @@ def moveTo(obj, device):
 # ─────────────────────────────────────────────────────────────────────────────
 # Improved Neural Network EZA
 # ─────────────────────────────────────────────────────────────────────────────
-
-def train_network_EZA(model, 
-                      loss_func, 
-                      train_loader, 
+def train_network_EZA(model,
+                      loss_func,
+                      train_loader,
                       test_loader=None,
-                      score_funcs=None, 
-                      epochs=300, 
-                      device='cpu',                      
-                      checkpoint_file=None, 
+                      score_funcs=None,
+                      epochs=300,
+                      device='cpu',
+                      checkpoint_file=None,
                       resume_from_checkpoint=None,
-                      checkpoint_every_x=None, 
+                      checkpoint_every_x=None,
                       use_amp=True,
                       optimizer=None,
                       lr_schedule=None,
-                      val_loader=None):
-    
-    
+                      val_loader=None,
+                      ignore_index=None):
     """
     Train neural networks with EZA improvements.
 
@@ -472,19 +457,15 @@ def train_network_EZA(model,
     resume_from_checkpoint -- path to load checkpoint from to resume training
     checkpoint_every_x     -- save intermediate checkpoint every X epochs
     use_amp                -- enable Automatic Mixed Precision (RTX GPUs)
-    optimizer              -- if none selected it uses AdamW optimizer
-    lr_schedule            -- uses the ReduceLROPlateu function.
-    val_loader             -- Optional PyTorch DataLoader to evaluate on after every epoch
+    optimizer              -- if None, AdamW with default settings
+    lr_schedule            -- any torch LR scheduler. ReduceLROnPlateau monitors
+                              val loss if val_loader is given, else test loss.
+    val_loader             -- Optional DataLoader to evaluate on after every epoch
+    ignore_index           -- label value dropped before scoring (e.g. PAD token)
 
     Returns: pd.DataFrame with training history
-
-    ------------------------------------------------------------------------------------------
-    
-    Improves over the train_simple_network:
-    - Uses new optimizers and schedulers
-
-
     """
+    device = str(device)
     to_track = ["epoch", "total time", "train loss"]
     if val_loader is not None:
         to_track.append("val loss")
@@ -500,20 +481,24 @@ def train_network_EZA(model,
 
     results = {item: [] for item in to_track}
 
-    if optimizer == None:
-        optimizer   = torch.optim.AdamW(model.parameters())
-    amp_enabled = use_amp and (device == "cuda")
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(model.parameters())
+    amp_enabled = use_amp and device.startswith("cuda")
     scaler      = torch.amp.GradScaler() if amp_enabled else None
 
     start_epoch = 0
+    epoch = start_epoch - 1
 
     if resume_from_checkpoint is not None:
-        checkpoint = torch.load(resume_from_checkpoint, weights_only=False)
+        checkpoint = torch.load(resume_from_checkpoint, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scaler is not None and "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
         start_epoch = checkpoint['epoch'] + 1
+        epoch = checkpoint['epoch']
         results = checkpoint.get('results', results)
-        total_train_time = results["total time"][-1] if results["total time"] else 0
+        total_train_time = sum(results["total time"]) if results["total time"] else 0
         print(f"Resuming from epoch {start_epoch}, previous time: {total_train_time:.2f}s")
 
     model.to(device)
@@ -523,47 +508,7 @@ def train_network_EZA(model,
             if isinstance(v, torch.Tensor):
                 state[k] = v.to(device)
 
-    for epoch in tqdm(range(start_epoch, epochs), desc="Epoch"):
-        model = model.train()
-
-        epoch_time = run_epoch(model, optimizer, train_loader, loss_func, device,
-                               results, score_funcs, prefix="train",
-                               desc="Training", scaler=scaler)
-
-        results["total time"].append(epoch_time)
-        results["epoch"].append(epoch)
-
-        if test_loader is not None:
-            model = model.eval()
-            with torch.no_grad():
-                run_epoch(model, optimizer, test_loader, loss_func, device,
-                          results, score_funcs, prefix="test", desc="Testing")
-
-        if val_loader is not None:
-            model = model.eval() #Set the model to "evaluation" mode, b/c we don't want to make any updates!
-            with torch.no_grad():
-                run_epoch(model, optimizer, val_loader, loss_func, device, results, score_funcs, prefix="val", desc="Validating")
-        
-        #In PyTorch, the convention is to update the learning rate after every epoch
-        if lr_schedule is not None:
-            if isinstance(lr_schedule, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                lr_schedule.step(results["val loss"][-1])
-            else:
-                lr_schedule.step()
-
-        # Periodic checkpoint
-        if checkpoint_every_x is not None and (epoch + 1) % checkpoint_every_x == 0:
-            ckpt_path = checkpoint_file if checkpoint_file else f'checkpoint_epoch_{epoch}.tar'
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'results': results
-            }, ckpt_path)
-            print(f"Checkpoint saved at epoch {epoch}")
-
-    # Final checkpoint
-    if checkpoint_file is not None:
+    def _save(path, epoch):
         payload = {
             "epoch": epoch,
             "model_state_dict": model.state_dict(),
@@ -572,35 +517,78 @@ def train_network_EZA(model,
         }
         if scaler is not None:
             payload["scaler_state_dict"] = scaler.state_dict()
-        torch.save(payload, checkpoint_file)
+        torch.save(payload, path)
+
+    for epoch in tqdm(range(start_epoch, epochs), desc="Epoch"):
+        model = model.train()
+
+        epoch_time = run_epoch(model, optimizer, train_loader, loss_func, device,
+                               results, score_funcs, prefix="train",
+                               desc="Training", scaler=scaler, ignore_index=ignore_index)
+
+        results["total time"].append(epoch_time)
+        results["epoch"].append(epoch)
+
+        # Evaluation also runs under autocast when AMP is on: ~half the
+        # activation memory and faster on Turing Tensor Cores.
+        if test_loader is not None:
+            model = model.eval()
+            with torch.no_grad():
+                run_epoch(model, optimizer, test_loader, loss_func, device,
+                          results, score_funcs, prefix="test", desc="Testing",
+                          scaler=scaler, ignore_index=ignore_index)
+
+        if val_loader is not None:
+            model = model.eval()
+            with torch.no_grad():
+                run_epoch(model, optimizer, val_loader, loss_func, device,
+                          results, score_funcs, prefix="val", desc="Validating",
+                          scaler=scaler, ignore_index=ignore_index)
+
+        # In PyTorch, the convention is to update the learning rate after every epoch
+        if lr_schedule is not None:
+            if isinstance(lr_schedule, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                monitor = "val loss" if val_loader is not None else "test loss"
+                if monitor not in results:
+                    raise ValueError("ReduceLROnPlateau needs a val_loader or test_loader.")
+                lr_schedule.step(results[monitor][-1])
+            else:
+                lr_schedule.step()
+
+        # Periodic checkpoint
+        if checkpoint_every_x is not None and (epoch + 1) % checkpoint_every_x == 0:
+            ckpt_path = checkpoint_file if checkpoint_file else f'checkpoint_epoch_{epoch}.tar'
+            _save(ckpt_path, epoch)
+            print(f"Checkpoint saved at epoch {epoch}")
+
+    # Final checkpoint
+    if checkpoint_file is not None:
+        _save(checkpoint_file, epoch)
 
     return pd.DataFrame.from_dict(results)
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from torch.utils.data import Dataset
-from skimage.io import imread
-from glob import glob
 
-
+# ─────────────────────────────────────────────────────────────────────────────
+# DSB2018 segmentation dataset
+# ─────────────────────────────────────────────────────────────────────────────
 class DSB2018_EZA(Dataset):
     """
     Dataset class for the 2018 Data Science Bowl (DSB2018) — Kaggle.
-    
+
     Loads nucleus microscopy images and their corresponding binary segmentation masks.
-    
+
     Optimized for:
-        - RTX 2080 Ti (10.57 GB VRAM, Turing sm_75)
+        - RTX 2080 Ti (10.57 GiB VRAM, Turing sm_75)
         - FP16 / AMP training (half-precision tensors on GPU)
         - PyTorch 2.9.1 + CUDA 12.8
-    
+
     Args:
         paths  (list[str]) : List of sample root directories. Each directory must contain:
                                <path>/images/<image>.png   — one RGB image
                                <path>/masks/<mask_n>.png   — one or more binary masks
         size   (int)       : Target spatial resolution for both image and mask (default 256).
-        device (str)       : 'cuda' or 'cpu'. Pre-pins data to the right device.
+        device (str)       : kept for backwards compatibility; tensors are returned
+                             on the CPU so DataLoader workers + pin_memory can handle them.
     """
 
     def __init__(self, paths: list, size: int = 256, device: str = "cpu"):
@@ -617,25 +605,16 @@ class DSB2018_EZA(Dataset):
         mask_paths = glob(self.paths[idx] + "/masks/*")   # N individual nucleus masks
 
         # ── 2. Load image ──────────────────────────────────────────────────────
-        # imread returns HWC uint8 → keep only RGB (drop alpha if present)
         img = imread(img_path)[:, :, :3]          # (H, W, 3)  uint8
-
-        # HWC → CHW, then float32 ∈ [0, 1]
-        # float32 here is intentional: AMP will cast to FP16 *inside* the model
-        # via autocast; keeping the DataLoader output in float32 avoids surprising
-        # precision losses before the forward pass.
+        # float32 is intentional: autocast casts to FP16 inside the model.
         img = np.moveaxis(img, -1, 0).astype(np.float32) / 255.0  # (3, H, W)
 
         # ── 3. Load & merge binary masks ───────────────────────────────────────
-        # Each .png file encodes one nucleus as a separate binary mask.
-        # We collapse them into a single binary segmentation map with logical OR.
-        masks      = [imread(f) / 255.0 for f in mask_paths]  # list of (H, W) float64
-        final_mask = np.zeros(masks[0].shape, dtype=np.float32)
-
-        for mask in masks:
-            # logical_or: any pixel belonging to ANY nucleus → 1.0
-            final_mask = np.logical_or(final_mask, mask)
-
+        # Merge in-place with a bool buffer: no float64 copies of every mask.
+        final_mask = None
+        for f in mask_paths:
+            m = imread(f) > 0
+            final_mask = m if final_mask is None else (final_mask | m)
         final_mask = final_mask.astype(np.float32)             # (H, W)
 
         # ── 4. NumPy → PyTorch tensors ─────────────────────────────────────────
@@ -643,20 +622,9 @@ class DSB2018_EZA(Dataset):
         mask_t = torch.from_numpy(final_mask).unsqueeze(0)     # (1, H, W)
 
         # ── 5. Spatial resize to (size × size) ────────────────────────────────
-        # F.interpolate requires a batch dim → add then remove.
-        # 'bilinear' for the image preserves smooth gradients.
-        # 'nearest'  for the mask keeps it strictly binary (no interpolation artefacts).
-        img_t = F.interpolate(
-            img_t.unsqueeze(0),
-            size=(self.size, self.size),
-            mode="bilinear",
-            align_corners=False,
-        ).squeeze(0)                                           # (3, size, size)
-
-        mask_t = F.interpolate(
-            mask_t.unsqueeze(0),
-            size=(self.size, self.size),
-            mode="nearest",
-        ).squeeze(0)                                           # (1, size, size)
+        img_t = F.interpolate(img_t.unsqueeze(0), size=(self.size, self.size),
+                              mode="bilinear", align_corners=False).squeeze(0)
+        mask_t = F.interpolate(mask_t.unsqueeze(0), size=(self.size, self.size),
+                               mode="nearest").squeeze(0)
 
         return img_t, mask_t   # both float32; AMP handles FP16 casting during training
