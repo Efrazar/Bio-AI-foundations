@@ -1,0 +1,16 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+.jupyter/
+
+# Downloaded datasets (torchvision re-downloads them on first run)
+data/
+
+# Trained model weights and checkpoints
+*.pt
+*.pth
+checkpoints/
+checkpoints_wgan_gp/
